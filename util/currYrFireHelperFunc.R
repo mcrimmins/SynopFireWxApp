@@ -219,7 +219,7 @@ append_current_year_reanalysis <- function(existing_rast, year = format(Sys.Date
 # get only current year Reanalysis 2 data
 # Download current-year geopotential height data (500mb or 700mb)
 # Author: MAC
-# Date: 2025-xx-xx
+# Date: 2025-09-03
 
 get_current_year_reanalysis <- function(year = format(Sys.Date(), "%Y"),
                                         var = "hgt",
@@ -283,6 +283,69 @@ get_current_year_reanalysis <- function(year = format(Sys.Date(), "%Y"),
   })
 }
 
+# get only current year Reanalysis 1 data
+# Download current-year geopotential height data (500mb or 700mb)
+# Author: MAC
+# Date: 2025-09-03
 
-
-
+get_current_year_reanalysis1 <- function(year = format(Sys.Date(), "%Y"),
+                                        var = "hgt",
+                                        level_index = 6,  # 6 = 500mb, 4 = 700mb
+                                        lat_min = 20, lat_max = 60,
+                                        lon_min = -140, lon_max = -60,
+                                        base_url = "https://psl.noaa.gov/thredds/dodsC/Datasets/ncep.reanalysis/pressure/hgt.") {
+  
+  library(ncdf4)
+  library(terra)
+  
+  tryCatch({
+    
+    opendap_url <- paste0(base_url, year, ".nc")
+    nc <- nc_open(opendap_url)
+    
+    # Get dimension values
+    lat_values <- ncvar_get(nc, "lat")
+    lon_values <- ncvar_get(nc, "lon")
+    time_values <- ncvar_get(nc, "time")
+    
+    # Adjust longitudes if necessary (0–360)
+    lon_min_adj <- ifelse(lon_min < 0, lon_min + 360, lon_min)
+    lon_max_adj <- ifelse(lon_max < 0, lon_max + 360, lon_max)
+    
+    # Indexing for spatial subset
+    lat_idx <- which(lat_values >= lat_min & lat_values <= lat_max)
+    lon_idx <- which(lon_values >= lon_min_adj & lon_values <= lon_max_adj)
+    
+    # Time subset: extract every 4th step (18Z only)
+    time_origin <- "1800-01-01"
+    dates <- as.Date(time_values / 24, origin = time_origin)
+    t_idx <- seq(4, length(time_values), by = 4)
+    
+    # Extract data: var[lon, lat, level, time]
+    hgt_data <- ncvar_get(nc, var,
+                          start = c(lon_idx[1], lat_idx[1], level_index, 1),
+                          count = c(length(lon_idx), length(lat_idx), 1, length(time_values)))
+    nc_close(nc)
+    
+    # Reorder to lat, lon, time
+    hgt_data <- aperm(hgt_data, c(2, 1, 3))
+    
+    # Adjust longitudes back to -180:180
+    lon_out <- ifelse(lon_values[lon_idx] > 180, lon_values[lon_idx] - 360, lon_values[lon_idx])
+    lat_out <- lat_values[lat_idx]
+    
+    # Create SpatRaster
+    r <- rast(hgt_data,
+              ext = ext(min(lon_out), max(lon_out), min(lat_out), max(lat_out)),
+              crs = "EPSG:4326")
+    r <- r[[t_idx]]
+    time(r) <- dates[t_idx]
+    
+    message("Downloaded current-year ", var, " data for ", year)
+    return(r)
+    
+  }, error = function(e) {
+    message("Error retrieving data for ", year, ": ", conditionMessage(e))
+    return(NULL)
+  })
+}

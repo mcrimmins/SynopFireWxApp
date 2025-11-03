@@ -3,7 +3,7 @@
 # Synoptic Fire Weather Viewer
 # Developed by Mike Crimmins | UArizona Climate Science Applications Program
 # Visualizes daily fire activity, upper-air reanalysis (GPH), and EDDI drought indices across CONUS.
-# added caching for fire data to improve load times, 1000mb level, and error handling for missing data
+# TIMES OUT WITH LONG WFIGS DATA LOAD
 # -------------------------------------------------------------------
 
 library(shiny)
@@ -13,7 +13,6 @@ library(terra)
 library(dplyr)
 library(lubridate)
 library(glue)
-library(shinycssloaders)
 
 # --- Helper functions ---
 source("./util/currYrFireHelperFunc.R")
@@ -52,8 +51,6 @@ get_eddi_date <- function(date, scale = "02wk", cache_dir = tempdir()) {
 hgt_500 <- get_current_year_reanalysis1(format(Sys.Date(), "%Y"), level_index = 6)
 hgt_700 <- get_current_year_reanalysis1(format(Sys.Date(), "%Y"), level_index = 4)
 hgt_850 <- get_current_year_reanalysis1(format(Sys.Date(), "%Y"), level_index = 3)
-hgt_1000 <- get_current_year_reanalysis1(format(Sys.Date(), "%Y"), level_index = 1)
-
 
 # load fire data
 # wfigs_sf <- get_wfigs_data() |>
@@ -62,6 +59,21 @@ hgt_1000 <- get_current_year_reanalysis1(format(Sys.Date(), "%Y"), level_index =
 # --- Load and cache fire data per session, refresh daily ------
 fire_cache <- file.path(tempdir(), "wfigs_cached.rds")
 
+if (!file.exists(fire_cache) || as.Date(file.info(fire_cache)$mtime) < Sys.Date()) {
+  message("🔄 Fetching fresh WFIGS fire data...")
+  fire_data <- tryCatch({
+    get_wfigs_data()
+  }, error = function(e) {
+    message(glue::glue("⚠️ Failed to fetch WFIGS data: {e$message}"))
+    NULL
+  })
+  
+  if (!is.null(fire_data)) {
+    saveRDS(fire_data, fire_cache)
+  }
+}
+
+# Load from cache (even if freshly updated)
 wfigs_sf <- tryCatch({
   readRDS(fire_cache) |>
     mutate(DiscoveryDate = as.Date(as_datetime(FireDiscoveryDateTime / 1000)))
@@ -99,7 +111,7 @@ ui <- fluidPage(
         column(2, actionButton("next_date", "→"))
       ),
       selectInput("level", "Pressure Level:",
-                  choices = c("500 mb" = "500", "700 mb" = "700", "850 mb" = "850","1000 mb" = "1000")),
+                  choices = c("500 mb" = "500", "700 mb" = "700", "850 mb" = "850")),
       selectInput("eddi_scale", "EDDI Timescale:", 
                   choices = c("1-week" = "01wk", "2-week" = "02wk", "1-month" = "01mn", 
                               "2-month" = "02mn", "3-month" = "03mn", "6-month" = "06mn"),
@@ -109,7 +121,7 @@ ui <- fluidPage(
         <h4>About This Tool</h4>
         <p>This interactive application provides a daily snapshot of current year fire weather and drought conditions across the contiguous United States (CONUS).</p>
         <ul>
-          <li><strong>Geopotential Height Fields</strong>: Upper-air patterns at 500/700/850/1000 mb from the 
+          <li><strong>Geopotential Height Fields</strong>: Upper-air patterns at 500/700/850 mb from the 
             <a href='https://psl.noaa.gov/data/gridded/data.ncep.reanalysis.html' target='_blank'>NOAA NCEP/DOE Reanalysis I</a>.</li>
           <li><strong>Evaporative Demand Drought Index (EDDI)</strong>: Sub-seasonal drought signals from 
             <a href='https://psl.noaa.gov/eddi' target='_blank'>NOAA/PSL</a>, available at multiple timescales.</li>
@@ -131,9 +143,7 @@ ui <- fluidPage(
       )
     ),
     mainPanel(
-      #leafletOutput("map", height = "700px"),
-      withSpinner(leafletOutput("map", height = "700px"), type = 6),
-      uiOutput("fireStatus"),
+      leafletOutput("map", height = "700px"),
       uiOutput("warnings_ui")
     )
   )
@@ -141,54 +151,6 @@ ui <- fluidPage(
 
 # --- Server ---
 server <- function(input, output, session) {
-  
-  # --- Fire data loading (non-blocking, runs after app renders) ---
-  wfigs_data <- reactiveVal(NULL)
-  
-  observe({
-    # Run once per session, or refresh daily if left open
-    invalidateLater(24 * 60 * 60 * 1000)
-    isolate({
-      fire_cache <- file.path(tempdir(), "wfigs_cached.rds")
-      
-      # Try to load cached data first
-      if (file.exists(fire_cache) && as.Date(file.info(fire_cache)$mtime) == Sys.Date()) {
-        message("✅ Using cached WFIGS fire data.")
-        wfigs_sf <- readRDS(fire_cache)
-      } else {
-        message("🔄 Fetching fresh WFIGS fire data...")
-        wfigs_sf <- tryCatch({
-          get_wfigs_data()
-        }, error = function(e) {
-          message(glue("⚠️ Failed to fetch WFIGS data: {e$message}"))
-          NULL
-        })
-        
-        if (!is.null(wfigs_sf)) {
-          saveRDS(wfigs_sf, fire_cache)
-        }
-      }
-      
-      # Finalize if data available
-      if (!is.null(wfigs_sf)) {
-        wfigs_sf <- wfigs_sf |>
-          mutate(DiscoveryDate = as.Date(as_datetime(FireDiscoveryDateTime / 1000)))
-        wfigs_data(wfigs_sf)
-        message("✅ Fire data loaded successfully.")
-      } else {
-        message("⚠️ Fire data not available.")
-      }
-    })
-  })
-  
-  output$fireStatus <- renderUI({
-    if (is.null(wfigs_data())) {
-      tags$p("🔥 Loading current year fire data... please wait.", style = "color: orange;")
-    } else {
-      tags$p("✅ Fire data loaded successfully.", style = "color: green;")
-    }
-  })
-  # --------------------------------------------------------------
   
   observeEvent(input$prev_date, {
     new_date <- input$map_date - 1
@@ -211,7 +173,6 @@ server <- function(input, output, session) {
              "500" = hgt_500[[date_idx]],
              "700" = hgt_700[[date_idx]],
              "850" = hgt_850[[date_idx]],
-             "1000" = hgt_1000[[date_idx]],
              NULL)
     } else {
       NULL
@@ -223,8 +184,7 @@ server <- function(input, output, session) {
   })
   
   filtered_fires <- reactive({
-    req(wfigs_data())  # wait until fire data is ready
-    wfigs_data() |> filter(DiscoveryDate == input$map_date)
+    wfigs_sf |> filter(DiscoveryDate == input$map_date)
   })
   
   output$map <- renderLeaflet({
